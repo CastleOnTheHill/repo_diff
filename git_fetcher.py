@@ -262,6 +262,8 @@ class GitFetcher:
 
         commits = self._parse_log(result.stdout)
         LOG.info("git log succeeded: range=%s commits=%d", range_spec, len(commits))
+        if not commits:
+            self._log_empty_range_diagnostics(repo_path, old_rev, new_rev)
         return commits, None
 
     def _try_fetch_revision(self, repo_path: str, revision: str) -> None:
@@ -348,6 +350,92 @@ class GitFetcher:
             return False, None
         LOG.warning("commit ancestry check failed: stderr=%s", result.stderr.strip())
         return None, result.stderr.strip() or "Failed to check commit ancestry"
+
+    def _log_empty_range_diagnostics(self, repo_path: str, old_rev: str, new_rev: str) -> None:
+        """Log why git log old..new resolved successfully but returned no commits."""
+        old_commit = self._rev_parse_commit(repo_path, old_rev)
+        new_commit = self._rev_parse_commit(repo_path, new_rev)
+        LOG.warning(
+            "git log returned zero commits for changed revisions: repo_path=%s old_revision=%s "
+            "new_revision=%s old_commit=%s new_commit=%s",
+            repo_path,
+            old_rev,
+            new_rev,
+            old_commit or "<unresolved>",
+            new_commit or "<unresolved>",
+        )
+
+        if old_commit and new_commit and old_commit == new_commit:
+            LOG.warning(
+                "empty range reason: old_revision and new_revision resolve to the same commit: %s",
+                old_commit,
+            )
+            return
+
+        if not old_commit or not new_commit:
+            LOG.warning(
+                "empty range reason: at least one revision could not be resolved as a commit "
+                "even though git log exited successfully"
+            )
+            return
+
+        old_is_ancestor = self._is_ancestor(repo_path, old_commit, new_commit)
+        new_is_ancestor = self._is_ancestor(repo_path, new_commit, old_commit)
+        forward_count = self._count_range(repo_path, old_commit, new_commit)
+        reverse_count = self._count_range(repo_path, new_commit, old_commit)
+        symmetric_count = self._count_symmetric_difference(repo_path, old_commit, new_commit)
+        LOG.warning(
+            "empty range ancestry diagnostics: old_is_ancestor_of_new=%s "
+            "new_is_ancestor_of_old=%s forward_count=%s reverse_count=%s symmetric_count=%s",
+            old_is_ancestor,
+            new_is_ancestor,
+            forward_count,
+            reverse_count,
+            symmetric_count,
+        )
+
+        if new_is_ancestor is True and old_is_ancestor is False:
+            LOG.warning(
+                "empty range reason: new_revision is an ancestor of old_revision, so old..new "
+                "has no forward commits. This looks like a rollback or reversed manifest order."
+            )
+        elif symmetric_count and symmetric_count > 0:
+            LOG.warning(
+                "empty range reason: revisions are related in a non-forward way; use the ancestry "
+                "diagnostics above to decide whether the manifest order is reversed or histories diverged."
+            )
+
+    def _rev_parse_commit(self, repo_path: str, revision: str) -> Optional[str]:
+        result = self._run_subprocess(["git", "-C", repo_path, "rev-parse", f"{revision}^{{commit}}"])
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
+
+    def _is_ancestor(self, repo_path: str, ancestor: str, descendant: str) -> Optional[bool]:
+        result = self._run_subprocess(["git", "-C", repo_path, "merge-base", "--is-ancestor", ancestor, descendant])
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+        return None
+
+    def _count_range(self, repo_path: str, old_rev: str, new_rev: str) -> Optional[int]:
+        result = self._run_subprocess(["git", "-C", repo_path, "rev-list", "--count", f"{old_rev}..{new_rev}"])
+        if result.returncode != 0:
+            return None
+        try:
+            return int(result.stdout.strip())
+        except ValueError:
+            return None
+
+    def _count_symmetric_difference(self, repo_path: str, old_rev: str, new_rev: str) -> Optional[int]:
+        result = self._run_subprocess(["git", "-C", repo_path, "rev-list", "--count", f"{old_rev}...{new_rev}"])
+        if result.returncode != 0:
+            return None
+        try:
+            return int(result.stdout.strip())
+        except ValueError:
+            return None
 
     def _run_best_effort(self, cmd: list[str]) -> subprocess.CompletedProcess:
         result = self._run_subprocess(cmd)

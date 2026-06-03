@@ -229,6 +229,31 @@ class ManifestRiskTests(unittest.TestCase):
             self.assertIn("Reviewed-by: Bob", commits[0]["notes"])
             self.assertIn("Merged-on: server/topic", commits[0]["notes"])
 
+    def test_empty_git_log_range_records_ancestry_diagnostics(self):
+        with self.temp_dir() as tmpdir:
+            repo = Path(tmpdir) / "repo"
+            repo.mkdir()
+            self.run_git(repo, "init")
+            self.run_git(repo, "config", "user.name", "Alice")
+            self.run_git(repo, "config", "user.email", "alice@example.com")
+            (repo / "file.txt").write_text("old\n", encoding="utf-8")
+            self.run_git(repo, "add", "file.txt")
+            self.run_git(repo, "commit", "-m", "old")
+            old_rev = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+            (repo / "file.txt").write_text("new\n", encoding="utf-8")
+            self.run_git(repo, "commit", "-am", "new")
+            new_rev = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+            with self.assertLogs("git_fetcher", level="WARNING") as cm:
+                commits, error = GitFetcher()._run_git_log(str(repo), new_rev, old_rev)
+
+            self.assertEqual(commits, [])
+            self.assertIsNone(error)
+            log = "\n".join(cm.output)
+            self.assertIn("git log returned zero commits for changed revisions", log)
+            self.assertIn("new_revision is an ancestor of old_revision", log)
+
     def test_repo_worktree_git_file_is_valid_local_repo(self):
         with self.temp_dir() as tmpdir:
             main = Path(tmpdir) / "main"
