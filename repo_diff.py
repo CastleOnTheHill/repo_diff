@@ -2,6 +2,7 @@
 """Main entry point for repo manifest diff and commit search."""
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -9,6 +10,9 @@ from diff_engine import DiffEngine
 from git_fetcher import GitFetcher
 from manifest_parser import ManifestParser
 from report_generator import ReportGenerator
+
+
+LOG = logging.getLogger(__name__)
 
 
 def main() -> int:
@@ -31,7 +35,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--format",
-        choices=["markdown", "json"],
+        choices=["markdown", "json", "html"],
         default="markdown",
         help="Output format. Defaults to markdown.",
     )
@@ -50,8 +54,31 @@ def main() -> int:
         metavar="SHA",
         help="Search one manifest and report whether this commit is in each project history.",
     )
+    parser.add_argument(
+        "--log-file",
+        help="Write diagnostic logs for manifest parsing, fetches, and git log resolution.",
+    )
 
     args = parser.parse_args()
+    if args.log_file:
+        try:
+            _configure_logging(args.log_file)
+        except OSError as e:
+            print(f"Error: failed to initialize log file: {e}", file=sys.stderr)
+            return 1
+
+    LOG.info("repo_diff started")
+    LOG.info(
+        "mode=%s old_manifest=%s new_manifest=%s repo_root=%s cache_dir=%s format=%s "
+        "allow_floating_revisions=%s",
+        "commit_search" if args.find_commit else "manifest_diff",
+        args.old_manifest,
+        args.new_manifest,
+        args.repo_root,
+        args.cache_dir,
+        args.format,
+        args.allow_floating_revisions,
+    )
 
     old_path = Path(args.old_manifest)
     if not old_path.exists():
@@ -84,6 +111,7 @@ def _run_manifest_diff(args: argparse.Namespace, old_path: Path, new_path: Path)
 
     diff_engine = DiffEngine()
     diff_result = diff_engine.diff(old_manifest.projects, new_manifest.projects)
+    LOG.info("diff summary: %s", diff_result.summary())
 
     if diff_result.changed:
         fetcher = GitFetcher(
@@ -92,9 +120,21 @@ def _run_manifest_diff(args: argparse.Namespace, old_path: Path, new_path: Path)
             allow_floating_revisions=args.allow_floating_revisions,
         )
         for cp in diff_result.changed:
+            LOG.info(
+                "fetching commit detail: project=%s path=%s old_revision=%s new_revision=%s url=%s",
+                cp.new.name,
+                cp.new.path,
+                cp.old.revision,
+                cp.new.revision,
+                cp.new.url,
+            )
             commits, error = fetcher.get_commits(cp.old, cp.new)
             cp.commits = commits
             cp.git_error = error
+            if error:
+                LOG.warning("commit detail unavailable: project=%s error=%s", cp.new.name, error)
+            else:
+                LOG.info("commit detail resolved: project=%s commits=%d", cp.new.name, len(commits))
 
     if not args.show_unchanged:
         diff_result.unchanged = []
@@ -121,6 +161,14 @@ def _run_commit_search(args: argparse.Namespace, manifest_path: Path) -> int:
 
     results = []
     for project in manifest.projects:
+        LOG.info(
+            "checking commit reachability: project=%s path=%s revision=%s url=%s commit=%s",
+            project.name,
+            project.path,
+            project.revision,
+            project.url,
+            args.find_commit,
+        )
         contains, error = fetcher.contains_commit(project, args.find_commit)
         results.append({
             "name": project.name,
@@ -149,6 +197,18 @@ def _write_report(report: str, output: str | None) -> None:
         print(f"Report generated: {output}")
     else:
         print(report)
+
+
+def _configure_logging(log_file: str) -> None:
+    path = Path(log_file)
+    if path.parent != Path("."):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=str(path),
+        filemode="w",
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 
 if __name__ == "__main__":

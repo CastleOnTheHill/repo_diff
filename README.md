@@ -9,6 +9,7 @@ projects listed in a manifest.
   projects.
 - For changed projects, list commits between the old and new revisions.
 - Preserve full commit messages, Git notes, and trailers such as `Change-Id`.
+- Generate reports as Markdown, JSON, or standalone HTML.
 - Support local repo workspaces via `--repo-root`.
 - Support remote mode by cloning/fetching project repositories into a cache.
 - Search one manifest to check whether a commit is reachable from each
@@ -35,10 +36,11 @@ python repo_diff.py manifest.xml --find-commit <commit-sha> [options]
 | `--repo-root PATH` | Repo workspace root. When set, Git history is read from local project repos. |
 | `--cache-dir PATH` | Remote bare clone cache directory. Defaults to `~/.cache/repo_diff`. |
 | `-o, --output FILE` | Output file path. Defaults to stdout. |
-| `--format {markdown,json}` | Output format. Defaults to `markdown`. |
+| `--format {markdown,json,html}` | Output format. Defaults to `markdown`. |
 | `--show-unchanged` | Show unchanged projects in diff mode. |
 | `--allow-floating-revisions` | Allow branch names or other non-pinned revisions in diff commit ranges. |
 | `--find-commit SHA` | Search one manifest for a commit in each project history. |
+| `--log-file FILE` | Write diagnostic logs for manifest parsing, remote fetches, and Git history resolution. |
 
 ## Examples
 
@@ -55,6 +57,16 @@ python repo_diff.py v1_manifest.xml v2_manifest.xml \
 python repo_diff.py v1_manifest.xml v2_manifest.xml \
     --format json \
     --output diff.json
+
+# HTML diff output
+python repo_diff.py v1_manifest.xml v2_manifest.xml \
+    --format html \
+    --output diff.html
+
+# Diagnose missing Git history details
+python repo_diff.py v1_manifest.xml v2_manifest.xml \
+    --log-file repo_diff.log \
+    --output diff.md
 
 # Search whether a commit is in each project history
 python repo_diff.py manifest.xml \

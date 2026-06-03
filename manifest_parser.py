@@ -1,8 +1,13 @@
 """Manifest XML parser for repo manifest files."""
 
+import logging
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
+
+
+LOG = logging.getLogger(__name__)
+LOG.addHandler(logging.NullHandler())
 
 
 @dataclass
@@ -62,6 +67,7 @@ class ManifestParser:
     """Parse a repo manifest XML file into a Manifest object."""
 
     def parse(self, xml_path: str) -> Manifest:
+        LOG.info("parsing manifest: %s", xml_path)
         tree = ET.parse(xml_path)
         root = tree.getroot()
 
@@ -75,6 +81,13 @@ class ManifestParser:
                     "revision": (remote_elem.get("revision") or "").strip(),
                     "alias": (remote_elem.get("alias") or "").strip(),
                 }
+                LOG.debug(
+                    "manifest remote: name=%s fetch=%s revision=%s alias=%s",
+                    name,
+                    remotes[name]["fetch"],
+                    remotes[name]["revision"],
+                    remotes[name]["alias"],
+                )
 
         # Parse default
         default = {
@@ -89,6 +102,7 @@ class ManifestParser:
             default["revision"] = (default_elem.get("revision") or "").strip()
             default["dest_branch"] = (default_elem.get("dest-branch") or "").strip()
             default["upstream"] = (default_elem.get("upstream") or "").strip()
+        LOG.debug("manifest default: %s", default)
 
         # Parse projects
         projects: List[Project] = []
@@ -119,6 +133,25 @@ class ManifestParser:
                 fetch = remotes[remote_name]["fetch"]
                 if fetch:
                     url, url_error = _build_project_url(fetch, name)
+            else:
+                LOG.warning("project remote is not defined: project=%s remote=%s", name, remote_name)
+            if url_error:
+                LOG.warning(
+                    "project URL could not be resolved: project=%s remote=%s fetch=%s error=%s",
+                    name,
+                    remote_name,
+                    remotes.get(remote_name, {}).get("fetch", ""),
+                    url_error,
+                )
+            else:
+                LOG.debug(
+                    "project parsed: name=%s path=%s remote=%s revision=%s url=%s",
+                    name,
+                    path,
+                    remote_name,
+                    revision,
+                    url,
+                )
 
             projects.append(Project(
                 name=name,
@@ -140,7 +173,10 @@ class ManifestParser:
                 removed_names.add(removed_name)
 
         projects = [p for p in projects if p.name not in removed_names]
+        if removed_names:
+            LOG.info("remove-project entries applied: %s", sorted(removed_names))
 
+        LOG.info("manifest parsed: %s projects=%d", xml_path, len(projects))
         return Manifest(projects=projects)
 
 

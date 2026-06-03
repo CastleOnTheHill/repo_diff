@@ -162,6 +162,39 @@ class ManifestRiskTests(unittest.TestCase):
         self.assertIn("Change-Id: Iabcdef", report)
         self.assertNotIn("| SHA | Message | Author | Date |", report)
 
+    def test_html_report_preserves_commit_text_and_escapes_content(self):
+        result = DiffEngine().diff(
+            self.parse_manifest(
+                """<?xml version="1.0"?>
+<manifest><project name="repo" path="repo" revision="1111111" /></manifest>
+"""
+            ).projects,
+            self.parse_manifest(
+                """<?xml version="1.0"?>
+<manifest><project name="repo" path="repo" revision="2222222" /></manifest>
+"""
+            ).projects,
+        )
+        result.changed[0].commits = [{
+            "sha": "2222222",
+            "subject": "Subject",
+            "message": "Subject\n\nBody    text\n  keep indent\n<script>alert(1)</script>",
+            "author": "Alice & Bob",
+            "date": "2026-04-30 10:00:00 +0800",
+            "notes": "Reviewed-by: Bob\nMerged-on: server/topic",
+            "trailers": "Change-Id: Iabcdef",
+        }]
+
+        report = ReportGenerator().generate(result, format="html")
+
+        self.assertIn("<!doctype html>", report)
+        self.assertIn("Manifest Diff Report", report)
+        self.assertIn("Body    text", report)
+        self.assertIn("  keep indent", report)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", report)
+        self.assertNotIn("<script>alert(1)</script>", report)
+        self.assertIn("Alice &amp; Bob", report)
+
     def test_run_git_log_reads_gerrit_review_notes(self):
         with self.temp_dir() as tmpdir:
             repo = Path(tmpdir) / "repo"
@@ -279,6 +312,133 @@ class ManifestRiskTests(unittest.TestCase):
             data = json.loads(result.stdout)
             self.assertEqual(data["summary"]["found"], 1)
             self.assertTrue(data["results"][0]["contains"])
+
+    def test_find_commit_cli_outputs_html(self):
+        with self.temp_dir() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            repo.mkdir()
+            self.run_git(repo, "init")
+            self.run_git(repo, "config", "user.name", "Alice")
+            self.run_git(repo, "config", "user.email", "alice@example.com")
+            (repo / "file.txt").write_text("content\n", encoding="utf-8")
+            self.run_git(repo, "add", "file.txt")
+            self.run_git(repo, "commit", "-m", "initial")
+            commit = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
+            manifest = root / "manifest.xml"
+            manifest.write_text(
+                f"""<?xml version="1.0"?>
+<manifest><project name="repo" path="repo" revision="{commit}" /></manifest>
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "repo_diff.py"),
+                    str(manifest),
+                    "--find-commit",
+                    commit,
+                    "--repo-root",
+                    str(root),
+                    "--format",
+                    "html",
+                ],
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+
+            self.assertIn("<!doctype html>", result.stdout)
+            self.assertIn("Commit History Search", result.stdout)
+            self.assertIn("FOUND", result.stdout)
+
+    def test_cli_log_file_records_relative_fetch_diagnostics(self):
+        with self.temp_dir() as tmpdir:
+            root = Path(tmpdir)
+            old_manifest = root / "old.xml"
+            new_manifest = root / "new.xml"
+            log_file = root / "repo_diff.log"
+            old_manifest.write_text(
+                """<?xml version="1.0"?>
+<manifest>
+  <remote name="origin" fetch="../org" />
+  <project name="repo" path="repo" remote="origin" revision="1111111" />
+</manifest>
+""",
+                encoding="utf-8",
+            )
+            new_manifest.write_text(
+                """<?xml version="1.0"?>
+<manifest>
+  <remote name="origin" fetch="../org" />
+  <project name="repo" path="repo" remote="origin" revision="2222222" />
+</manifest>
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "repo_diff.py"),
+                    str(old_manifest),
+                    str(new_manifest),
+                    "--log-file",
+                    str(log_file),
+                ],
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+
+            log = log_file.read_text(encoding="utf-8")
+            self.assertIn("Relative remote fetch cannot be resolved", log)
+            self.assertIn("cannot prepare remote repo because URL is missing", log)
+
+    def test_cli_log_file_records_unpinned_revision_diagnostics(self):
+        with self.temp_dir() as tmpdir:
+            root = Path(tmpdir)
+            old_manifest = root / "old.xml"
+            new_manifest = root / "new.xml"
+            log_file = root / "repo_diff.log"
+            old_manifest.write_text(
+                """<?xml version="1.0"?>
+<manifest>
+  <remote name="origin" fetch="https://github.com/org" />
+  <project name="repo" path="repo" remote="origin" revision="master" />
+</manifest>
+""",
+                encoding="utf-8",
+            )
+            new_manifest.write_text(
+                """<?xml version="1.0"?>
+<manifest>
+  <remote name="origin" fetch="https://github.com/org" />
+  <project name="repo" path="repo" remote="origin" revision="main" />
+</manifest>
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "repo_diff.py"),
+                    str(old_manifest),
+                    str(new_manifest),
+                    "--log-file",
+                    str(log_file),
+                ],
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+
+            log = log_file.read_text(encoding="utf-8")
+            self.assertIn("revision is not pinned", log)
+            self.assertIn("commit range rejected", log)
 
     def run_git(self, repo: Path, *args: str):
         return subprocess.run(
