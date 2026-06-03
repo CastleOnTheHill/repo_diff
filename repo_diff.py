@@ -13,6 +13,7 @@ from report_generator import ReportGenerator
 
 
 LOG = logging.getLogger(__name__)
+LOG.addHandler(logging.NullHandler())
 
 
 def main() -> int:
@@ -35,9 +36,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--format",
-        choices=["markdown", "json", "html"],
-        default="markdown",
-        help="Output format. Defaults to markdown.",
+        choices=["markdown", "json", "html", "excel"],
+        default="html",
+        help="Output format. Defaults to html.",
     )
     parser.add_argument(
         "--show-unchanged",
@@ -190,11 +191,17 @@ def _run_commit_search(args: argparse.Namespace, manifest_path: Path) -> int:
     return 0
 
 
-def _write_report(report: str, output: str | None) -> None:
+def _write_report(report: str | bytes, output: str | None) -> None:
     if output:
-        with open(output, "w", encoding="utf-8") as f:
-            f.write(report)
+        if isinstance(report, bytes):
+            with open(output, "wb") as f:
+                f.write(report)
+        else:
+            with open(output, "w", encoding="utf-8") as f:
+                f.write(report)
         print(f"Report generated: {output}")
+    elif isinstance(report, bytes):
+        sys.stdout.buffer.write(report)
     else:
         print(report)
 

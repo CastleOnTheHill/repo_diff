@@ -9,7 +9,8 @@ projects listed in a manifest.
   projects.
 - For changed projects, list commits between the old and new revisions.
 - Preserve full commit messages, Git notes, and trailers such as `Change-Id`.
-- Generate reports as Markdown, JSON, or standalone HTML.
+- Generate reports as standalone HTML, Markdown, JSON, or Excel `.xlsx`.
+- Filter standalone HTML reports with plain text search or regular expressions.
 - Support local repo workspaces via `--repo-root`.
 - Support remote mode by cloning/fetching project repositories into a cache.
 - Search one manifest to check whether a commit is reachable from each
@@ -36,7 +37,7 @@ python repo_diff.py manifest.xml --find-commit <commit-sha> [options]
 | `--repo-root PATH` | Repo workspace root. When set, Git history is read from local project repos. |
 | `--cache-dir PATH` | Remote bare clone cache directory. Defaults to `~/.cache/repo_diff`. |
 | `-o, --output FILE` | Output file path. Defaults to stdout. |
-| `--format {markdown,json,html}` | Output format. Defaults to `markdown`. |
+| `--format {markdown,json,html,excel}` | Output format. Defaults to `html`. |
 | `--show-unchanged` | Show unchanged projects in diff mode. |
 | `--allow-floating-revisions` | Allow branch names or other non-pinned revisions in diff commit ranges. |
 | `--find-commit SHA` | Search one manifest for a commit in each project history. |
@@ -45,12 +46,17 @@ python repo_diff.py manifest.xml --find-commit <commit-sha> [options]
 ## Examples
 
 ```bash
-# Diff with remote fetch/cache mode
-python repo_diff.py v1_manifest.xml v2_manifest.xml --output diff.md
+# Diff with remote fetch/cache mode and default HTML output
+python repo_diff.py v1_manifest.xml v2_manifest.xml --output diff.html
 
 # Diff using an existing repo workspace
 python repo_diff.py v1_manifest.xml v2_manifest.xml \
     --repo-root /path/to/source \
+    --output diff.html
+
+# Markdown diff output
+python repo_diff.py v1_manifest.xml v2_manifest.xml \
+    --format markdown \
     --output diff.md
 
 # JSON diff output
@@ -58,15 +64,15 @@ python repo_diff.py v1_manifest.xml v2_manifest.xml \
     --format json \
     --output diff.json
 
-# HTML diff output
+# Excel diff output
 python repo_diff.py v1_manifest.xml v2_manifest.xml \
-    --format html \
-    --output diff.html
+    --format excel \
+    --output diff.xlsx
 
 # Diagnose missing Git history details
 python repo_diff.py v1_manifest.xml v2_manifest.xml \
     --log-file repo_diff.log \
-    --output diff.md
+    --output diff.html
 
 # Search whether a commit is in each project history
 python repo_diff.py manifest.xml \

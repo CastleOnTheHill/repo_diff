@@ -1,9 +1,11 @@
 import json
+import io
 import shutil
 import subprocess
 import sys
 import unittest
 import uuid
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -194,6 +196,117 @@ class ManifestRiskTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", report)
         self.assertNotIn("<script>alert(1)</script>", report)
         self.assertIn("Alice &amp; Bob", report)
+        self.assertIn('id="report-filter"', report)
+        self.assertIn('id="report-regex"', report)
+        self.assertIn("new RegExp", report)
+        self.assertIn("data-filter-item", report)
+
+    def test_excel_report_contains_diff_sheets(self):
+        result = DiffEngine().diff(
+            self.parse_manifest(
+                """<?xml version="1.0"?>
+<manifest><project name="repo" path="repo" revision="1111111" /></manifest>
+"""
+            ).projects,
+            self.parse_manifest(
+                """<?xml version="1.0"?>
+<manifest><project name="repo" path="repo" revision="2222222" /></manifest>
+"""
+            ).projects,
+        )
+        result.changed[0].commits = [{
+            "sha": "2222222",
+            "subject": "Subject",
+            "message": "Subject\n\nBody",
+            "author": "Alice",
+            "date": "2026-04-30 10:00:00 +0800",
+            "notes": "Reviewed-by: Bob",
+            "trailers": "Change-Id: Iabcdef",
+        }]
+
+        report = ReportGenerator().generate(result, format="excel")
+
+        self.assertIsInstance(report, bytes)
+        with zipfile.ZipFile(io.BytesIO(report)) as zf:
+            self.assertIn("xl/workbook.xml", zf.namelist())
+            workbook = zf.read("xl/workbook.xml").decode("utf-8")
+            commits = zf.read("xl/worksheets/sheet3.xml").decode("utf-8")
+        self.assertIn('name="Summary"', workbook)
+        self.assertIn('name="Projects"', workbook)
+        self.assertIn('name="Commits"', workbook)
+        self.assertIn("Subject", commits)
+        self.assertIn("Reviewed-by: Bob", commits)
+
+    def test_diff_cli_defaults_to_html_output(self):
+        with self.temp_dir() as tmpdir:
+            root = Path(tmpdir)
+            old_manifest = root / "old.xml"
+            new_manifest = root / "new.xml"
+            old_manifest.write_text(
+                """<?xml version="1.0"?>
+<manifest><project name="repo" path="repo" revision="1111111" /></manifest>
+""",
+                encoding="utf-8",
+            )
+            new_manifest.write_text(
+                """<?xml version="1.0"?>
+<manifest><project name="repo" path="repo" revision="2222222" /></manifest>
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "repo_diff.py"),
+                    str(old_manifest),
+                    str(new_manifest),
+                ],
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+
+            self.assertIn("<!doctype html>", result.stdout)
+            self.assertIn("Manifest Diff Report", result.stdout)
+            self.assertEqual(result.stderr, "")
+
+    def test_diff_cli_writes_excel_output_file(self):
+        with self.temp_dir() as tmpdir:
+            root = Path(tmpdir)
+            old_manifest = root / "old.xml"
+            new_manifest = root / "new.xml"
+            output = root / "diff.xlsx"
+            old_manifest.write_text(
+                """<?xml version="1.0"?>
+<manifest><project name="repo" path="repo" revision="1111111" /></manifest>
+""",
+                encoding="utf-8",
+            )
+            new_manifest.write_text(
+                """<?xml version="1.0"?>
+<manifest><project name="repo" path="repo" revision="2222222" /></manifest>
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "repo_diff.py"),
+                    str(old_manifest),
+                    str(new_manifest),
+                    "--format",
+                    "excel",
+                    "--output",
+                    str(output),
+                ],
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+
+            self.assertTrue(output.read_bytes().startswith(b"PK"))
 
     def test_run_git_log_reads_gerrit_review_notes(self):
         with self.temp_dir() as tmpdir:
@@ -378,6 +491,29 @@ class ManifestRiskTests(unittest.TestCase):
             self.assertIn("<!doctype html>", result.stdout)
             self.assertIn("Commit History Search", result.stdout)
             self.assertIn("FOUND", result.stdout)
+
+    def test_commit_search_excel_report_contains_results_sheet(self):
+        report = ReportGenerator().generate_commit_search(
+            "abc123",
+            [{
+                "name": "repo",
+                "path": "repo",
+                "revision": "abc123",
+                "url": "https://example.com/repo.git",
+                "url_error": None,
+                "contains": True,
+                "error": None,
+            }],
+            format="excel",
+        )
+
+        self.assertIsInstance(report, bytes)
+        with zipfile.ZipFile(io.BytesIO(report)) as zf:
+            workbook = zf.read("xl/workbook.xml").decode("utf-8")
+            results = zf.read("xl/worksheets/sheet2.xml").decode("utf-8")
+        self.assertIn('name="Results"', workbook)
+        self.assertIn("FOUND", results)
+        self.assertIn("repo", results)
 
     def test_cli_log_file_records_relative_fetch_diagnostics(self):
         with self.temp_dir() as tmpdir:

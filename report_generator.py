@@ -1,7 +1,10 @@
 """Report generators for manifest diff results."""
 
 import html
+import io
 import json
+import re
+import zipfile
 from typing import Dict, List
 
 from diff_engine import ChangedProject, DiffResult
@@ -10,11 +13,13 @@ from diff_engine import ChangedProject, DiffResult
 class ReportGenerator:
     """Generate formatted reports from diff results."""
 
-    def generate(self, result: DiffResult, format: str = "markdown") -> str:
+    def generate(self, result: DiffResult, format: str = "markdown") -> str | bytes:
         if format == "json":
             return self._generate_json(result)
         if format == "html":
             return self._generate_html(result)
+        if format == "excel":
+            return self._generate_excel(result)
         return self._generate_markdown(result)
 
     def generate_commit_search(
@@ -22,7 +27,7 @@ class ReportGenerator:
         commit: str,
         results: List[Dict],
         format: str = "markdown",
-    ) -> str:
+    ) -> str | bytes:
         if format == "json":
             return json.dumps({
                 "commit": commit,
@@ -31,6 +36,8 @@ class ReportGenerator:
             }, indent=2, ensure_ascii=False)
         if format == "html":
             return self._generate_commit_search_html(commit, results)
+        if format == "excel":
+            return self._generate_commit_search_excel(commit, results)
         return self._generate_commit_search_markdown(commit, results)
 
     def _generate_markdown(self, result: DiffResult) -> str:
@@ -180,11 +187,27 @@ class ReportGenerator:
         }
         return json.dumps(data, indent=2, ensure_ascii=False)
 
+    def _generate_excel(self, result: DiffResult) -> bytes:
+        summary = result.summary()
+        sheets = [
+            ("Summary", [
+                ["Metric", "Count"],
+                ["Added projects", summary["added"]],
+                ["Removed projects", summary["removed"]],
+                ["Changed projects", summary["changed"]],
+                ["Unchanged projects", summary["unchanged"]],
+            ]),
+            ("Projects", _diff_project_rows(result)),
+            ("Commits", _diff_commit_rows(result)),
+        ]
+        return _xlsx_workbook(sheets)
+
     def _generate_html(self, result: DiffResult) -> str:
         summary = result.summary()
         body = [
             "<main>",
             "<h1>Manifest Diff Report</h1>",
+            _filter_toolbar(),
             '<section class="summary">',
             "<h2>Summary</h2>",
             '<div class="summary-grid">',
@@ -259,7 +282,7 @@ class ReportGenerator:
         new = cp.new
         branch = new.branch_name() or old.branch_name() or "N/A"
         parts = [
-            '<article class="changed-project">',
+            '<article class="changed-project" data-filter-item>',
             f"<h3>{_e(new.name)}</h3>",
             '<dl class="metadata">',
             f"<div><dt>Path</dt><dd>{_e(new.path)}</dd></div>",
@@ -367,6 +390,7 @@ class ReportGenerator:
         body = [
             "<main>",
             "<h1>Commit History Search</h1>",
+            _filter_toolbar(),
             '<section class="summary">',
             "<h2>Summary</h2>",
             f'<p class="commit-target">Commit <code>{_e(commit)}</code></p>',
@@ -383,6 +407,43 @@ class ReportGenerator:
             "</main>",
         ]
         return _html_page("Commit History Search", "\n".join(body))
+
+    def _generate_commit_search_excel(self, commit: str, results: List[Dict]) -> bytes:
+        summary = _commit_search_summary(results)
+        rows = [
+            ["Status", "Project", "Path", "Revision", "URL", "URL Error", "Detail"],
+        ]
+        for item in results:
+            if item["error"]:
+                status = "ERROR"
+                detail = item["error"]
+            elif item["contains"]:
+                status = "FOUND"
+                detail = "commit is reachable from manifest revision"
+            else:
+                status = "NOT_FOUND"
+                detail = "commit is not reachable from manifest revision"
+            rows.append([
+                status,
+                item["name"],
+                item["path"],
+                item["revision"],
+                item["url"],
+                item["url_error"] or "",
+                detail,
+            ])
+
+        sheets = [
+            ("Summary", [
+                ["Metric", "Value"],
+                ["Commit", commit],
+                ["Found", summary["found"]],
+                ["Not found", summary["not_found"]],
+                ["Errors", summary["errors"]],
+            ]),
+            ("Results", rows),
+        ]
+        return _xlsx_workbook(sheets)
 
 
 def _indented_fenced_block(text: str) -> List[str]:
@@ -416,6 +477,263 @@ def _commit_search_summary(results: List[Dict]) -> Dict[str, int]:
     }
 
 
+def _diff_project_rows(result: DiffResult) -> List[List]:
+    rows = [[
+        "Status",
+        "Project",
+        "Path",
+        "Branch",
+        "Old Revision",
+        "New Revision",
+        "URL",
+        "URL Error",
+        "Commit Detail Status",
+        "Commit Count",
+        "Git Error",
+    ]]
+    for p in result.added:
+        rows.append([
+            "ADDED",
+            p.name,
+            p.path,
+            p.branch_name() or "",
+            "",
+            p.revision,
+            p.url,
+            p.url_error or "",
+            "no_old_revision",
+            "",
+            "",
+        ])
+    for p in result.removed:
+        rows.append([
+            "REMOVED",
+            p.name,
+            p.path,
+            p.branch_name() or "",
+            p.revision,
+            "",
+            p.url,
+            p.url_error or "",
+            "no_new_revision",
+            "",
+            "",
+        ])
+    for cp in result.changed:
+        status = "error" if cp.git_error else "resolved"
+        rows.append([
+            "CHANGED",
+            cp.new.name,
+            cp.new.path,
+            cp.new.branch_name() or cp.old.branch_name() or "",
+            cp.old.revision,
+            cp.new.revision,
+            cp.new.url,
+            cp.new.url_error or "",
+            status,
+            len(cp.commits),
+            cp.git_error or "",
+        ])
+    for p in result.unchanged:
+        rows.append([
+            "UNCHANGED",
+            p.name,
+            p.path,
+            p.branch_name() or "",
+            p.revision,
+            p.revision,
+            p.url,
+            p.url_error or "",
+            "unchanged",
+            "",
+            "",
+        ])
+    return rows
+
+
+def _diff_commit_rows(result: DiffResult) -> List[List]:
+    rows = [[
+        "Project",
+        "Path",
+        "Old Revision",
+        "New Revision",
+        "SHA",
+        "Subject",
+        "Author",
+        "Date",
+        "Message",
+        "Notes",
+        "Trailers",
+    ]]
+    for cp in result.changed:
+        if not cp.commits:
+            rows.append([
+                cp.new.name,
+                cp.new.path,
+                cp.old.revision,
+                cp.new.revision,
+                "",
+                "New commits: none" if not cp.git_error else "Commit detail unavailable",
+                "",
+                "",
+                cp.git_error or "",
+                "",
+                "",
+            ])
+            continue
+        for commit in cp.commits:
+            rows.append([
+                cp.new.name,
+                cp.new.path,
+                cp.old.revision,
+                cp.new.revision,
+                commit.get("sha", ""),
+                commit.get("subject", ""),
+                commit.get("author", ""),
+                commit.get("date", ""),
+                commit.get("message", ""),
+                commit.get("notes", ""),
+                commit.get("trailers", ""),
+            ])
+    return rows
+
+
+def _xlsx_workbook(sheets: List[tuple[str, List[List]]]) -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", _xlsx_content_types(len(sheets)))
+        zf.writestr("_rels/.rels", _xlsx_root_rels())
+        zf.writestr("xl/workbook.xml", _xlsx_workbook_xml(sheets))
+        zf.writestr("xl/_rels/workbook.xml.rels", _xlsx_workbook_rels(len(sheets)))
+        zf.writestr("xl/styles.xml", _xlsx_styles())
+        for index, (_, rows) in enumerate(sheets, start=1):
+            zf.writestr(f"xl/worksheets/sheet{index}.xml", _xlsx_sheet(rows))
+    return output.getvalue()
+
+
+def _xlsx_content_types(sheet_count: int) -> str:
+    sheet_overrides = "\n".join(
+        (
+            f'<Override PartName="/xl/worksheets/sheet{index}.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        )
+        for index in range(1, sheet_count + 1)
+    )
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+  {sheet_overrides}
+</Types>"""
+
+
+def _xlsx_root_rels() -> str:
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"""
+
+
+def _xlsx_workbook_xml(sheets: List[tuple[str, List[List]]]) -> str:
+    sheet_xml = "\n".join(
+        (
+            f'<sheet name="{_xml_attr(_safe_sheet_name(name, index))}" sheetId="{index}" '
+            f'r:id="rId{index}"/>'
+        )
+        for index, (name, _) in enumerate(sheets, start=1)
+    )
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    {sheet_xml}
+  </sheets>
+</workbook>"""
+
+
+def _xlsx_workbook_rels(sheet_count: int) -> str:
+    sheet_rels = "\n".join(
+        (
+            f'<Relationship Id="rId{index}" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+            f'Target="worksheets/sheet{index}.xml"/>'
+        )
+        for index in range(1, sheet_count + 1)
+    )
+    style_id = sheet_count + 1
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  {sheet_rels}
+  <Relationship Id="rId{style_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"""
+
+
+def _xlsx_styles() -> str:
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+  <borders count="1"><border/></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
+</styleSheet>"""
+
+
+def _xlsx_sheet(rows: List[List]) -> str:
+    row_xml = []
+    for row_index, row in enumerate(rows, start=1):
+        cells = []
+        for col_index, value in enumerate(row, start=1):
+            cells.append(_xlsx_cell(_cell_ref(row_index, col_index), value))
+        row_xml.append(f'<row r="{row_index}">{"".join(cells)}</row>')
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    {''.join(row_xml)}
+  </sheetData>
+</worksheet>"""
+
+
+def _xlsx_cell(ref: str, value) -> str:
+    if value is None:
+        value = ""
+    if isinstance(value, bool):
+        return f'<c r="{ref}" t="b"><v>{1 if value else 0}</v></c>'
+    if isinstance(value, (int, float)):
+        return f'<c r="{ref}"><v>{value}</v></c>'
+    return (
+        f'<c r="{ref}" t="inlineStr"><is><t xml:space="preserve">'
+        f'{_xml_text(value)}</t></is></c>'
+    )
+
+
+def _cell_ref(row: int, col: int) -> str:
+    letters = ""
+    while col:
+        col, remainder = divmod(col - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return f"{letters}{row}"
+
+
+def _safe_sheet_name(name: str, index: int) -> str:
+    cleaned = re.sub(r"[\[\]:*?/\\]", "_", name).strip("'")
+    return (cleaned or f"Sheet{index}")[:31]
+
+
+def _xml_text(value) -> str:
+    return html.escape(_clean_xml_text(str(value)), quote=False)
+
+
+def _xml_attr(value) -> str:
+    return html.escape(_clean_xml_text(str(value)), quote=True)
+
+
+def _clean_xml_text(value: str) -> str:
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", value)
+
+
 def _html_page(title: str, body: str) -> str:
     return "\n".join([
         "<!doctype html>",
@@ -430,6 +748,9 @@ def _html_page(title: str, body: str) -> str:
         "</head>",
         "<body>",
         body,
+        "<script>",
+        _html_filter_script(),
+        "</script>",
         "</body>",
         "</html>",
     ])
@@ -474,6 +795,55 @@ section {
   border-radius: 8px;
   margin-bottom: 16px;
   padding: 18px;
+}
+.filter-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  background: rgba(247, 248, 250, 0.96);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  padding: 12px;
+}
+.filter-toolbar input[type="search"] {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font: inherit;
+}
+.filter-toolbar input.invalid {
+  border-color: var(--removed);
+  outline-color: var(--removed);
+}
+.filter-toolbar label {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.filter-toolbar button {
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  font: inherit;
+  padding: 7px 12px;
+}
+.filter-status {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+[hidden] {
+  display: none !important;
 }
 .summary-grid {
   display: grid;
@@ -598,6 +968,9 @@ dd { margin: 0; overflow-wrap: anywhere; }
   }
   h1 { font-size: 26px; }
   section { padding: 14px; }
+  .filter-toolbar {
+    grid-template-columns: 1fr;
+  }
   table {
     display: block;
     overflow-x: auto;
@@ -616,6 +989,81 @@ def _summary_item(label: str, count: int, class_name: str) -> str:
     )
 
 
+def _filter_toolbar() -> str:
+    return "\n".join([
+        '<div class="filter-toolbar">',
+        '<input id="report-filter" type="search" placeholder="Search report">',
+        '<label><input id="report-regex" type="checkbox"> Regex</label>',
+        '<button id="report-clear" type="button">Clear</button>',
+        '<div id="filter-status" class="filter-status" aria-live="polite"></div>',
+        "</div>",
+    ])
+
+
+def _html_filter_script() -> str:
+    return r"""
+(function () {
+  const input = document.getElementById("report-filter");
+  const regexToggle = document.getElementById("report-regex");
+  const clearButton = document.getElementById("report-clear");
+  const status = document.getElementById("filter-status");
+  if (!input || !regexToggle || !clearButton || !status) return;
+
+  const items = Array.from(document.querySelectorAll("[data-filter-item]"));
+
+  function getMatcher(query, useRegex) {
+    if (!query) return { matcher: function () { return true; } };
+    if (!useRegex) {
+      const needle = query.toLowerCase();
+      return {
+        matcher: function (text) {
+          return text.toLowerCase().includes(needle);
+        }
+      };
+    }
+    try {
+      const pattern = new RegExp(query, "i");
+      return {
+        matcher: function (text) {
+          return pattern.test(text);
+        }
+      };
+    } catch (error) {
+      return { error: error.message };
+    }
+  }
+
+  function applyFilter() {
+    const query = input.value.trim();
+    const result = getMatcher(query, regexToggle.checked);
+    input.classList.toggle("invalid", Boolean(result.error));
+
+    if (result.error) {
+      status.textContent = "Invalid regular expression: " + result.error;
+      return;
+    }
+
+    let visible = 0;
+    items.forEach(function (item) {
+      const matches = result.matcher(item.textContent || "");
+      item.hidden = !matches;
+      if (matches) visible += 1;
+    });
+    status.textContent = query ? visible + " / " + items.length + " items shown" : items.length + " items";
+  }
+
+  input.addEventListener("input", applyFilter);
+  regexToggle.addEventListener("change", applyFilter);
+  clearButton.addEventListener("click", function () {
+    input.value = "";
+    input.focus();
+    applyFilter();
+  });
+  applyFilter();
+})();
+""".strip()
+
+
 def _project_table(projects, headers: List[str], row_builder) -> str:
     rows = [[_e(cell) for cell in row_builder(project)] for project in projects]
     return _html_table(headers, rows)
@@ -625,7 +1073,7 @@ def _html_table(headers: List[str], rows: List[List[str]]) -> str:
     header_html = "".join(f"<th>{_e(header)}</th>" for header in headers)
     body_rows = []
     for row in rows:
-        body_rows.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>")
+        body_rows.append('<tr data-filter-item>' + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>")
     return (
         "<table>"
         "<thead><tr>"
