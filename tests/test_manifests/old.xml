@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+	<remote name="github-ssh"
+		fetch="ssh://git@github.com" />
+	<default remote="github-ssh"
+		revision="master"
+		sync-j="4" />
+	<project name="tompreston/notes" path="notes" />
+	<project name="tompreston/dotfiles" path="dotfiles" />
+</manifest>

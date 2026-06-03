@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+	<remote name="github"
+		fetch="https://github.com" />
+	<default remote="github"
+		revision="master" />
+	<project name="tompreston/notes" path="notes" revision="abc1234" />
+	<project name="tompreston/dotfiles" path="dotfiles" revision="xyz9999" />
+	<project name="tompreston/newrepo" path="newrepo" revision="new0001" />
+</manifest>
