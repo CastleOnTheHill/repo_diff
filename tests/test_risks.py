@@ -308,6 +308,97 @@ class ManifestRiskTests(unittest.TestCase):
 
             self.assertTrue(output.read_bytes().startswith(b"PK"))
 
+    def test_single_manifest_cli_compares_against_latest_branch(self):
+        with self.temp_dir() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            repo.mkdir()
+            self.run_git(repo, "init")
+            self.run_git(repo, "checkout", "-b", "main")
+            self.run_git(repo, "config", "user.name", "Alice")
+            self.run_git(repo, "config", "user.email", "alice@example.com")
+            (repo / "file.txt").write_text("old\n", encoding="utf-8")
+            self.run_git(repo, "add", "file.txt")
+            self.run_git(repo, "commit", "-m", "old")
+            old_rev = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
+            (repo / "file.txt").write_text("new\n", encoding="utf-8")
+            self.run_git(repo, "commit", "-am", "new")
+            new_rev = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+            manifest = root / "manifest.xml"
+            manifest.write_text(
+                f"""<?xml version="1.0"?>
+<manifest>
+  <project name="repo" path="repo" revision="{old_rev}" upstream="refs/heads/main" />
+</manifest>
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "repo_diff.py"),
+                    str(manifest),
+                    "--repo-root",
+                    str(root),
+                    "--format",
+                    "json",
+                ],
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+
+            data = json.loads(result.stdout)
+            self.assertEqual(data["summary"]["changed"], 1)
+            self.assertEqual(data["summary"]["unchanged"], 0)
+            self.assertEqual(data["changed"][0]["old_revision"], old_rev)
+            self.assertEqual(data["changed"][0]["new_revision"], new_rev)
+            self.assertEqual(data["changed"][0]["commits"][0]["subject"], "new")
+
+    def test_single_manifest_cli_reports_missing_branch_for_latest_diff(self):
+        with self.temp_dir() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            repo.mkdir()
+            self.run_git(repo, "init")
+            self.run_git(repo, "config", "user.name", "Alice")
+            self.run_git(repo, "config", "user.email", "alice@example.com")
+            (repo / "file.txt").write_text("content\n", encoding="utf-8")
+            self.run_git(repo, "add", "file.txt")
+            self.run_git(repo, "commit", "-m", "initial")
+            revision = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+            manifest = root / "manifest.xml"
+            manifest.write_text(
+                f"""<?xml version="1.0"?>
+<manifest>
+  <project name="repo" path="repo" revision="{revision}" />
+</manifest>
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "repo_diff.py"),
+                    str(manifest),
+                    "--repo-root",
+                    str(root),
+                    "--format",
+                    "json",
+                ],
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+
+            data = json.loads(result.stdout)
+            self.assertEqual(data["summary"]["changed"], 1)
+            self.assertIn("Cannot determine branch", data["changed"][0]["git_error"])
+
     def test_run_git_log_reads_gerrit_review_notes(self):
         with self.temp_dir() as tmpdir:
             repo = Path(tmpdir) / "repo"

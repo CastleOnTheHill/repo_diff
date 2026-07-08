@@ -6,6 +6,7 @@ import re
 import shlex
 import subprocess
 import hashlib
+from dataclasses import replace
 from typing import Dict, List, Optional
 from manifest_parser import Project, is_pinned_revision
 
@@ -69,6 +70,58 @@ class GitFetcher:
         else:
             return self._get_commits_remote(old_proj, new_proj)
 
+    def get_commits_to_latest(
+        self,
+        project: Project,
+    ) -> tuple[Project, List[Dict[str, str]], Optional[str]]:
+        """
+        Compare a manifest project revision with the latest commit on its branch.
+        Returns (latest_project, commits_list, error_message).
+        """
+        branch = _comparison_branch(project)
+        if not branch:
+            LOG.warning("latest comparison rejected because branch is missing: project=%s", project.name)
+            return project, [], (
+                "Cannot determine branch for latest comparison; manifest project needs "
+                "upstream, dest-branch, or a branch revision"
+            )
+
+        if not self.allow_floating_revisions and not is_pinned_revision(project.revision):
+            LOG.warning(
+                "latest comparison rejected because manifest revision is not pinned: "
+                "project=%s revision=%s",
+                project.name,
+                project.revision,
+            )
+            return replace(project, revision=branch), [], (
+                "Cannot determine commit changes from manifest alone because "
+                f"revision is not pinned: {project.revision}"
+            )
+
+        repo_path, error = self._prepare_project_repo(project)
+        if error:
+            LOG.warning("project repo preparation failed for latest comparison: project=%s error=%s", project.name, error)
+            return replace(project, revision=branch), [], error
+
+        self._try_fetch_branch(repo_path, project, branch)
+        latest_revision, error = self._resolve_latest_branch_revision(repo_path, project, branch)
+        if error:
+            LOG.warning("latest branch revision could not be resolved: project=%s error=%s", project.name, error)
+            return replace(project, revision=branch), [], error
+
+        old_commit = self._rev_parse_commit(repo_path, project.revision)
+        if old_commit and old_commit == latest_revision:
+            LOG.info(
+                "manifest revision already matches latest branch revision: project=%s revision=%s",
+                project.name,
+                latest_revision,
+            )
+            return project, [], None
+
+        latest_project = replace(project, revision=latest_revision)
+        commits, error = self._run_git_log(repo_path, project.revision, latest_revision)
+        return latest_project, commits, error
+
     def _get_commits_local(self, old_proj: Project, new_proj: Project) -> tuple[List[Dict[str, str]], Optional[str]]:
         """Local mode: run git log in the existing working tree."""
         local_path = os.path.join(self.repo_root, new_proj.path)
@@ -88,6 +141,17 @@ class GitFetcher:
             return [], error
 
         return self._run_git_log(cache_path, old_proj.revision, new_proj.revision)
+
+    def _prepare_project_repo(self, project: Project) -> tuple[str, Optional[str]]:
+        """Return a local repo path or prepared remote cache path for a project."""
+        if self.repo_root:
+            local_path = os.path.join(self.repo_root, project.path)
+            LOG.debug("using local project path for latest comparison: project=%s path=%s", project.name, local_path)
+            if not self._is_git_work_tree(local_path):
+                LOG.warning("local git repo not found: project=%s path=%s", project.name, local_path)
+                return "", f"Local git repo not found at: {local_path}"
+            return local_path, None
+        return self._prepare_remote_repo(project)
 
     def contains_commit(self, project: Project, commit: str) -> tuple[Optional[bool], Optional[str]]:
         """
@@ -287,6 +351,62 @@ class GitFetcher:
             result.returncode,
         )
 
+    def _try_fetch_branch(self, repo_path: str, project: Project, branch: str) -> None:
+        """Best-effort fetch of a branch into remote-tracking refs."""
+        short = _short_branch_name(branch)
+        if not short:
+            return
+        remote_names = self._remote_names(repo_path)
+        if project.remote and project.remote not in remote_names:
+            remote_names.append(project.remote)
+        for remote in remote_names:
+            refspec = f"+refs/heads/{short}:refs/remotes/{remote}/{short}"
+            result = self._run_best_effort(["git", "-C", repo_path, "fetch", remote, refspec])
+            LOG.debug(
+                "latest branch fetch result: repo_path=%s remote=%s branch=%s refspec=%s returncode=%s",
+                repo_path,
+                remote,
+                branch,
+                refspec,
+                result.returncode,
+            )
+
+    def _resolve_latest_branch_revision(
+        self,
+        repo_path: str,
+        project: Project,
+        branch: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Resolve a branch name to the latest commit available in a repo."""
+        candidates = _branch_ref_candidates(project, branch, self._remote_names(repo_path))
+        LOG.debug(
+            "resolving latest branch revision: project=%s branch=%s candidates=%s",
+            project.name,
+            branch,
+            candidates,
+        )
+        for candidate in candidates:
+            commit = self._rev_parse_commit(repo_path, candidate)
+            if commit:
+                LOG.info(
+                    "latest branch revision resolved: project=%s branch=%s ref=%s commit=%s",
+                    project.name,
+                    branch,
+                    candidate,
+                    commit,
+                )
+                return commit, None
+        return None, f"Cannot resolve latest branch revision for branch: {branch}"
+
+    def _remote_names(self, repo_path: str) -> List[str]:
+        result = self._run_subprocess(["git", "-C", repo_path, "remote"])
+        if result.returncode != 0:
+            return ["origin"]
+        names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if names and "origin" not in names:
+            names.insert(0, "origin")
+        return names
+
     def _parse_log(self, stdout: str) -> List[Dict[str, str]]:
         """Parse git log --format output."""
         commits = []
@@ -469,3 +589,46 @@ class GitFetcher:
 
 def _format_cmd(cmd: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in cmd)
+
+
+def _comparison_branch(project: Project) -> Optional[str]:
+    branch = project.branch_name()
+    if not branch or branch.startswith("refs/tags/"):
+        return None
+    return branch
+
+
+def _short_branch_name(branch: str) -> str:
+    if branch.startswith("refs/heads/"):
+        return branch[len("refs/heads/"):]
+    if branch.startswith("refs/remotes/"):
+        parts = branch.split("/", 3)
+        return parts[3] if len(parts) == 4 else ""
+    return branch
+
+
+def _branch_ref_candidates(
+    project: Project,
+    branch: str,
+    remote_names: List[str],
+) -> List[str]:
+    candidates: List[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in candidates:
+            candidates.append(value)
+
+    short = _short_branch_name(branch)
+    add(branch)
+    if branch.startswith("refs/heads/"):
+        add(short)
+    if short:
+        for remote in remote_names:
+            add(f"refs/remotes/{remote}/{short}")
+            add(f"{remote}/{short}")
+        if project.remote and project.remote not in remote_names:
+            add(f"refs/remotes/{project.remote}/{short}")
+            add(f"{project.remote}/{short}")
+        add(f"refs/heads/{short}")
+        add(short)
+    return candidates

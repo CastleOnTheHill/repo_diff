@@ -6,7 +6,7 @@ import logging
 import sys
 from pathlib import Path
 
-from diff_engine import DiffEngine
+from diff_engine import ChangedProject, DiffEngine, DiffResult
 from git_fetcher import GitFetcher
 from manifest_parser import ManifestParser
 from report_generator import ReportGenerator
@@ -20,8 +20,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Compare repo manifests or search for a commit in one manifest.",
     )
-    parser.add_argument("old_manifest", help="Manifest XML file path")
-    parser.add_argument("new_manifest", nargs="?", help="New manifest XML file path for diff mode")
+    parser.add_argument("old_manifest", help="Base manifest XML file path")
+    parser.add_argument(
+        "new_manifest",
+        nargs="?",
+        help=(
+            "Optional new manifest XML file path. If omitted in diff mode, compare each "
+            "project with the latest commit on its corresponding branch."
+        ),
+    )
     parser.add_argument(
         "--repo-root",
         help="Repo workspace root. When set, project histories are read from local repos.",
@@ -72,7 +79,7 @@ def main() -> int:
     LOG.info(
         "mode=%s old_manifest=%s new_manifest=%s repo_root=%s cache_dir=%s format=%s "
         "allow_floating_revisions=%s",
-        "commit_search" if args.find_commit else "manifest_diff",
+        "commit_search" if args.find_commit else ("manifest_diff" if args.new_manifest else "latest_branch_diff"),
         args.old_manifest,
         args.new_manifest,
         args.repo_root,
@@ -90,8 +97,7 @@ def main() -> int:
         return _run_commit_search(args, old_path)
 
     if not args.new_manifest:
-        print("Error: new_manifest is required unless --find-commit is used", file=sys.stderr)
-        return 1
+        return _run_manifest_latest_diff(args, old_path)
 
     new_path = Path(args.new_manifest)
     if not new_path.exists():
@@ -136,6 +142,60 @@ def _run_manifest_diff(args: argparse.Namespace, old_path: Path, new_path: Path)
                 LOG.warning("commit detail unavailable: project=%s error=%s", cp.new.name, error)
             else:
                 LOG.info("commit detail resolved: project=%s commits=%d", cp.new.name, len(commits))
+
+    if not args.show_unchanged:
+        diff_result.unchanged = []
+
+    generator = ReportGenerator()
+    report = generator.generate(diff_result, format=args.format)
+    _write_report(report, args.output)
+    return 0
+
+
+def _run_manifest_latest_diff(args: argparse.Namespace, manifest_path: Path) -> int:
+    manifest_parser = ManifestParser()
+    try:
+        manifest = manifest_parser.parse(str(manifest_path))
+    except Exception as e:
+        print(f"Error: failed to parse manifest: {e}", file=sys.stderr)
+        return 1
+
+    fetcher = GitFetcher(
+        repo_root=args.repo_root,
+        cache_dir=args.cache_dir,
+        allow_floating_revisions=args.allow_floating_revisions,
+    )
+    diff_result = DiffResult()
+
+    for project in manifest.projects:
+        LOG.info(
+            "checking latest branch changes: project=%s path=%s revision=%s branch=%s url=%s",
+            project.name,
+            project.path,
+            project.revision,
+            project.branch_name(),
+            project.url,
+        )
+        latest_project, commits, error = fetcher.get_commits_to_latest(project)
+        if error:
+            diff_result.changed.append(ChangedProject(
+                old=project,
+                new=latest_project,
+                git_error=error,
+            ))
+            continue
+        if latest_project.revision != project.revision or commits:
+            diff_result.changed.append(ChangedProject(
+                old=project,
+                new=latest_project,
+                commits=commits,
+            ))
+        else:
+            diff_result.unchanged.append(project)
+
+    diff_result.changed.sort(key=lambda c: c.new.name)
+    diff_result.unchanged.sort(key=lambda p: p.name)
+    LOG.info("latest branch diff summary: %s", diff_result.summary())
 
     if not args.show_unchanged:
         diff_result.unchanged = []
