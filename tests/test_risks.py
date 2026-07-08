@@ -357,6 +357,43 @@ class ManifestRiskTests(unittest.TestCase):
             self.assertEqual(data["changed"][0]["new_revision"], new_rev)
             self.assertEqual(data["changed"][0]["commits"][0]["subject"], "new")
 
+    def test_latest_branch_local_mode_does_not_fetch_remote(self):
+        class NoFetchGitFetcher(GitFetcher):
+            def _try_fetch_branch(self, repo_path, project, branch):
+                raise AssertionError("local latest diff must not fetch remotes")
+
+        with self.temp_dir() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            repo.mkdir()
+            self.run_git(repo, "init")
+            self.run_git(repo, "checkout", "-b", "main")
+            self.run_git(repo, "config", "user.name", "Alice")
+            self.run_git(repo, "config", "user.email", "alice@example.com")
+            (repo / "file.txt").write_text("old\n", encoding="utf-8")
+            self.run_git(repo, "add", "file.txt")
+            self.run_git(repo, "commit", "-m", "old")
+            old_rev = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
+            (repo / "file.txt").write_text("new\n", encoding="utf-8")
+            self.run_git(repo, "commit", "-am", "new")
+            new_rev = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+            project = self.parse_manifest(
+                f"""<?xml version="1.0"?>
+<manifest>
+  <project name="repo" path="repo" revision="{old_rev}" upstream="refs/heads/main" />
+</manifest>
+"""
+            ).projects[0]
+
+            latest_project, commits, error = NoFetchGitFetcher(
+                repo_root=str(root),
+            ).get_commits_to_latest(project)
+
+            self.assertIsNone(error)
+            self.assertEqual(latest_project.revision, new_rev)
+            self.assertEqual(commits[0]["subject"], "new")
+
     def test_single_manifest_cli_reports_missing_branch_for_latest_diff(self):
         with self.temp_dir() as tmpdir:
             root = Path(tmpdir)

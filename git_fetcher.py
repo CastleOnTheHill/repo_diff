@@ -103,7 +103,8 @@ class GitFetcher:
             LOG.warning("project repo preparation failed for latest comparison: project=%s error=%s", project.name, error)
             return replace(project, revision=branch), [], error
 
-        self._try_fetch_branch(repo_path, project, branch)
+        if not self.repo_root:
+            self._try_fetch_branch(repo_path, project, branch)
         latest_revision, error = self._resolve_latest_branch_revision(repo_path, project, branch)
         if error:
             LOG.warning("latest branch revision could not be resolved: project=%s error=%s", project.name, error)
