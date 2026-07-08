@@ -23,15 +23,19 @@ class GitFetcher:
         repo_root: Optional[str] = None,
         cache_dir: Optional[str] = None,
         allow_floating_revisions: bool = False,
+        git_timeout: float = 300,
     ):
         self.repo_root = repo_root
         self.cache_dir = cache_dir or os.path.expanduser("~/.cache/repo_diff")
         self.allow_floating_revisions = allow_floating_revisions
+        self.git_timeout = git_timeout
         LOG.debug(
-            "git fetcher initialized: repo_root=%s cache_dir=%s allow_floating_revisions=%s",
+            "git fetcher initialized: repo_root=%s cache_dir=%s allow_floating_revisions=%s "
+            "git_timeout=%s",
             self.repo_root,
             self.cache_dir,
             self.allow_floating_revisions,
+            self.git_timeout,
         )
 
     def get_commits(self, old_proj: Project, new_proj: Project) -> tuple[List[Dict[str, str]], Optional[str]]:
@@ -358,8 +362,6 @@ class GitFetcher:
         if not short:
             return
         remote_names = self._remote_names(repo_path)
-        if project.remote and project.remote not in remote_names:
-            remote_names.append(project.remote)
         for remote in remote_names:
             refspec = f"+refs/heads/{short}:refs/remotes/{remote}/{short}"
             result = self._run_best_effort(["git", "-C", repo_path, "fetch", remote, refspec])
@@ -566,7 +568,24 @@ class GitFetcher:
 
     def _run_subprocess(self, cmd: list[str]) -> subprocess.CompletedProcess:
         LOG.debug("running command: %s", _format_cmd(cmd))
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        env = _git_noninteractive_env()
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.git_timeout,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as e:
+            stderr = _timeout_stderr(cmd, self.git_timeout, e.stderr)
+            LOG.warning("command timed out: cmd=%s timeout=%s", _format_cmd(cmd), self.git_timeout)
+            return subprocess.CompletedProcess(
+                cmd,
+                124,
+                stdout=_stream_text(e.stdout),
+                stderr=stderr,
+            )
         if result.returncode == 0:
             LOG.debug("command succeeded: %s", _format_cmd(cmd))
         else:
@@ -590,6 +609,28 @@ class GitFetcher:
 
 def _format_cmd(cmd: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in cmd)
+
+
+def _git_noninteractive_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    env.setdefault("GCM_INTERACTIVE", "Never")
+    env.setdefault("GIT_SSH_COMMAND", "ssh -oBatchMode=yes")
+    return env
+
+
+def _timeout_stderr(cmd: list[str], timeout: float, stderr) -> str:
+    stderr_text = _stream_text(stderr)
+    message = f"Command timed out after {timeout:g}s: {_format_cmd(cmd)}"
+    if stderr_text.strip():
+        return f"{message}\n{stderr_text.strip()}"
+    return message
+
+
+def _stream_text(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
 
 
 def _comparison_branch(project: Project) -> Optional[str]:

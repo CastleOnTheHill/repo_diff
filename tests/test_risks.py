@@ -8,6 +8,7 @@ import uuid
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 from git_fetcher import GitFetcher
 from diff_engine import DiffEngine
@@ -131,6 +132,35 @@ class ManifestRiskTests(unittest.TestCase):
         )
         self.assertEqual(commits[0]["notes"], "Reviewed-by: Bob\nMerged-on: server/topic")
         self.assertEqual(commits[0]["trailers"], "Change-Id: Iabcdef")
+
+    def test_git_subprocess_timeout_returns_error_instead_of_hanging(self):
+        result = GitFetcher(git_timeout=0.05)._run_subprocess([
+            sys.executable,
+            "-c",
+            "import time; time.sleep(1)",
+        ])
+
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("Command timed out after", result.stderr)
+
+    def test_git_subprocess_uses_noninteractive_environment(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            result = GitFetcher()._run_subprocess([
+                sys.executable,
+                "-c",
+                (
+                    "import os; "
+                    "print(os.environ.get('GIT_TERMINAL_PROMPT')); "
+                    "print(os.environ.get('GCM_INTERACTIVE')); "
+                    "print(os.environ.get('GIT_SSH_COMMAND'))"
+                ),
+            ])
+
+        self.assertEqual(result.returncode, 0)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[0], "0")
+        self.assertEqual(lines[1], "Never")
+        self.assertIn("BatchMode=yes", lines[2])
 
     def test_markdown_report_uses_code_blocks_for_full_commit_text(self):
         result = DiffEngine().diff(

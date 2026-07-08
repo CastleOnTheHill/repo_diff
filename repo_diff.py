@@ -58,6 +58,12 @@ def main() -> int:
         help="Allow git log between branch names or other non-pinned revisions.",
     )
     parser.add_argument(
+        "--git-timeout",
+        type=float,
+        default=300,
+        help="Timeout in seconds for each Git command. Defaults to 300.",
+    )
+    parser.add_argument(
         "--find-commit",
         metavar="SHA",
         help="Search one manifest and report whether this commit is in each project history.",
@@ -68,6 +74,9 @@ def main() -> int:
     )
 
     args = parser.parse_args()
+    if args.git_timeout <= 0:
+        print("Error: --git-timeout must be greater than 0", file=sys.stderr)
+        return 1
     if args.log_file:
         try:
             _configure_logging(args.log_file)
@@ -78,7 +87,7 @@ def main() -> int:
     LOG.info("repo_diff started")
     LOG.info(
         "mode=%s old_manifest=%s new_manifest=%s repo_root=%s cache_dir=%s format=%s "
-        "allow_floating_revisions=%s",
+        "allow_floating_revisions=%s git_timeout=%s",
         "commit_search" if args.find_commit else ("manifest_diff" if args.new_manifest else "latest_branch_diff"),
         args.old_manifest,
         args.new_manifest,
@@ -86,6 +95,7 @@ def main() -> int:
         args.cache_dir,
         args.format,
         args.allow_floating_revisions,
+        args.git_timeout,
     )
 
     old_path = Path(args.old_manifest)
@@ -125,6 +135,7 @@ def _run_manifest_diff(args: argparse.Namespace, old_path: Path, new_path: Path)
             repo_root=args.repo_root,
             cache_dir=args.cache_dir,
             allow_floating_revisions=args.allow_floating_revisions,
+            git_timeout=args.git_timeout,
         )
         for cp in diff_result.changed:
             LOG.info(
@@ -164,6 +175,7 @@ def _run_manifest_latest_diff(args: argparse.Namespace, manifest_path: Path) -> 
         repo_root=args.repo_root,
         cache_dir=args.cache_dir,
         allow_floating_revisions=args.allow_floating_revisions,
+        git_timeout=args.git_timeout,
     )
     diff_result = DiffResult()
 
@@ -218,6 +230,7 @@ def _run_commit_search(args: argparse.Namespace, manifest_path: Path) -> int:
         repo_root=args.repo_root,
         cache_dir=args.cache_dir,
         allow_floating_revisions=args.allow_floating_revisions,
+        git_timeout=args.git_timeout,
     )
 
     results = []

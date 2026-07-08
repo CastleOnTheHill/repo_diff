@@ -48,6 +48,7 @@ python repo_diff.py manifest.xml --find-commit <commit-sha> [options]
 | `--format {markdown,json,html,excel}` | Output format. Defaults to `html`. |
 | `--show-unchanged` | Show unchanged projects in diff mode. |
 | `--allow-floating-revisions` | Allow branch names or other non-pinned revisions in diff commit ranges. |
+| `--git-timeout SEC` | Timeout for each Git command. Defaults to 300 seconds. |
 | `--find-commit SHA` | Search one manifest for a commit in each project history. |
 | `--log-file FILE` | Write diagnostic logs for manifest parsing, remote fetches, and Git history resolution. |
 
@@ -89,6 +90,12 @@ python repo_diff.py v1_manifest.xml v2_manifest.xml \
 python repo_diff.py v1_manifest.xml v2_manifest.xml \
     --log-file repo_diff.log \
     --output diff.html
+
+# Increase per-command timeout for slow remote repositories
+python repo_diff.py v1_manifest.xml \
+    --git-timeout 900 \
+    --log-file repo_diff.log \
+    --output latest.html
 
 # Search whether a commit is in each project history
 python repo_diff.py manifest.xml \
