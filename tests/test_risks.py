@@ -6,7 +6,7 @@ import sys
 import unittest
 import uuid
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from pathlib import Path
 from unittest import mock
 
@@ -134,14 +134,23 @@ class ManifestRiskTests(unittest.TestCase):
         self.assertEqual(commits[0]["trailers"], "Change-Id: Iabcdef")
 
     def test_git_subprocess_timeout_returns_error_instead_of_hanging(self):
-        result = GitFetcher(git_timeout=0.05)._run_subprocess([
-            sys.executable,
-            "-c",
-            "import time; time.sleep(1)",
-        ])
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = GitFetcher(
+                git_timeout=0.05,
+                show_progress=True,
+                progress_interval=0.01,
+            )._run_subprocess([
+                sys.executable,
+                "-c",
+                "import time; time.sleep(1)",
+            ])
 
         self.assertEqual(result.returncode, 124)
         self.assertIn("Command timed out after", result.stderr)
+        progress = stderr.getvalue()
+        self.assertIn("step=", progress)
+        self.assertIn("timeout_remaining=", progress)
 
     def test_git_subprocess_uses_noninteractive_environment(self):
         with mock.patch.dict("os.environ", {}, clear=True):
@@ -299,7 +308,7 @@ class ManifestRiskTests(unittest.TestCase):
 
             self.assertIn("<!doctype html>", result.stdout)
             self.assertIn("Manifest Diff Report", result.stdout)
-            self.assertEqual(result.stderr, "")
+            self.assertIn("project=repo path=repo status=processing", result.stderr)
 
     def test_diff_cli_writes_excel_output_file(self):
         with self.temp_dir() as tmpdir:

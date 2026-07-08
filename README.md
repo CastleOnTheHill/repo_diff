@@ -52,6 +52,9 @@ python repo_diff.py manifest.xml --find-commit <commit-sha> [options]
 | `--find-commit SHA` | Search one manifest for a commit in each project history. |
 | `--log-file FILE` | Write diagnostic logs for manifest parsing, remote fetches, and Git history resolution. |
 
+Progress is printed to stderr while each project and Git step is processed. The
+report itself still goes to stdout or `--output`.
+
 ## Examples
 
 ```bash

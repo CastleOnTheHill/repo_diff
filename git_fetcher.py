@@ -6,6 +6,8 @@ import re
 import shlex
 import subprocess
 import hashlib
+import sys
+import time
 from dataclasses import replace
 from typing import Dict, List, Optional
 from manifest_parser import Project, is_pinned_revision
@@ -24,18 +26,25 @@ class GitFetcher:
         cache_dir: Optional[str] = None,
         allow_floating_revisions: bool = False,
         git_timeout: float = 300,
+        show_progress: bool = False,
+        progress_interval: float = 30,
     ):
         self.repo_root = repo_root
         self.cache_dir = cache_dir or os.path.expanduser("~/.cache/repo_diff")
         self.allow_floating_revisions = allow_floating_revisions
         self.git_timeout = git_timeout
+        self.show_progress = show_progress
+        self.progress_interval = progress_interval
+        self._active_project: Optional[str] = None
         LOG.debug(
             "git fetcher initialized: repo_root=%s cache_dir=%s allow_floating_revisions=%s "
-            "git_timeout=%s",
+            "git_timeout=%s show_progress=%s progress_interval=%s",
             self.repo_root,
             self.cache_dir,
             self.allow_floating_revisions,
             self.git_timeout,
+            self.show_progress,
+            self.progress_interval,
         )
 
     def get_commits(self, old_proj: Project, new_proj: Project) -> tuple[List[Dict[str, str]], Optional[str]]:
@@ -43,36 +52,42 @@ class GitFetcher:
         Get list of commits between old_proj.revision and new_proj.revision.
         Returns (commits_list, error_message).
         """
-        LOG.info(
-            "resolving commit range: project=%s old_revision=%s new_revision=%s "
-            "old_pinned=%s new_pinned=%s mode=%s",
-            new_proj.name,
-            old_proj.revision,
-            new_proj.revision,
-            is_pinned_revision(old_proj.revision),
-            is_pinned_revision(new_proj.revision),
-            "local" if self.repo_root else "remote",
-        )
-        if not self.allow_floating_revisions:
-            unpinned = []
-            for rev in (old_proj.revision, new_proj.revision):
-                if rev and not is_pinned_revision(rev) and rev not in unpinned:
-                    unpinned.append(rev)
-            if unpinned:
-                LOG.warning(
-                    "commit range rejected because revision is not pinned: project=%s revisions=%s",
-                    new_proj.name,
-                    ", ".join(unpinned),
-                )
-                return [], (
-                    "Cannot determine commit changes from manifest alone because "
-                    f"revision is not pinned: {', '.join(unpinned)}"
-                )
+        previous_project = self._active_project
+        self._active_project = _project_progress_label(new_proj)
+        self._emit_progress(f"{self._active_project} status=processing")
+        try:
+            LOG.info(
+                "resolving commit range: project=%s old_revision=%s new_revision=%s "
+                "old_pinned=%s new_pinned=%s mode=%s",
+                new_proj.name,
+                old_proj.revision,
+                new_proj.revision,
+                is_pinned_revision(old_proj.revision),
+                is_pinned_revision(new_proj.revision),
+                "local" if self.repo_root else "remote",
+            )
+            if not self.allow_floating_revisions:
+                unpinned = []
+                for rev in (old_proj.revision, new_proj.revision):
+                    if rev and not is_pinned_revision(rev) and rev not in unpinned:
+                        unpinned.append(rev)
+                if unpinned:
+                    LOG.warning(
+                        "commit range rejected because revision is not pinned: project=%s revisions=%s",
+                        new_proj.name,
+                        ", ".join(unpinned),
+                    )
+                    return [], (
+                        "Cannot determine commit changes from manifest alone because "
+                        f"revision is not pinned: {', '.join(unpinned)}"
+                    )
 
-        if self.repo_root:
-            return self._get_commits_local(old_proj, new_proj)
-        else:
-            return self._get_commits_remote(old_proj, new_proj)
+            if self.repo_root:
+                return self._get_commits_local(old_proj, new_proj)
+            else:
+                return self._get_commits_remote(old_proj, new_proj)
+        finally:
+            self._active_project = previous_project
 
     def get_commits_to_latest(
         self,
@@ -82,50 +97,60 @@ class GitFetcher:
         Compare a manifest project revision with the latest commit on its branch.
         Returns (latest_project, commits_list, error_message).
         """
-        branch = _comparison_branch(project)
-        if not branch:
-            LOG.warning("latest comparison rejected because branch is missing: project=%s", project.name)
-            return project, [], (
-                "Cannot determine branch for latest comparison; manifest project needs "
-                "upstream, dest-branch, or a branch revision"
-            )
+        previous_project = self._active_project
+        self._active_project = _project_progress_label(project)
+        self._emit_progress(f"{self._active_project} status=processing")
+        try:
+            branch = _comparison_branch(project)
+            if not branch:
+                LOG.warning("latest comparison rejected because branch is missing: project=%s", project.name)
+                return project, [], (
+                    "Cannot determine branch for latest comparison; manifest project needs "
+                    "upstream, dest-branch, or a branch revision"
+                )
 
-        if not self.allow_floating_revisions and not is_pinned_revision(project.revision):
-            LOG.warning(
-                "latest comparison rejected because manifest revision is not pinned: "
-                "project=%s revision=%s",
-                project.name,
-                project.revision,
-            )
-            return replace(project, revision=branch), [], (
-                "Cannot determine commit changes from manifest alone because "
-                f"revision is not pinned: {project.revision}"
-            )
+            if not self.allow_floating_revisions and not is_pinned_revision(project.revision):
+                LOG.warning(
+                    "latest comparison rejected because manifest revision is not pinned: "
+                    "project=%s revision=%s",
+                    project.name,
+                    project.revision,
+                )
+                return replace(project, revision=branch), [], (
+                    "Cannot determine commit changes from manifest alone because "
+                    f"revision is not pinned: {project.revision}"
+                )
 
-        repo_path, error = self._prepare_project_repo(project)
-        if error:
-            LOG.warning("project repo preparation failed for latest comparison: project=%s error=%s", project.name, error)
-            return replace(project, revision=branch), [], error
+            repo_path, error = self._prepare_project_repo(project)
+            if error:
+                LOG.warning(
+                    "project repo preparation failed for latest comparison: project=%s error=%s",
+                    project.name,
+                    error,
+                )
+                return replace(project, revision=branch), [], error
 
-        if not self.repo_root:
-            self._try_fetch_branch(repo_path, project, branch)
-        latest_revision, error = self._resolve_latest_branch_revision(repo_path, project, branch)
-        if error:
-            LOG.warning("latest branch revision could not be resolved: project=%s error=%s", project.name, error)
-            return replace(project, revision=branch), [], error
+            if not self.repo_root:
+                self._try_fetch_branch(repo_path, project, branch)
+            latest_revision, error = self._resolve_latest_branch_revision(repo_path, project, branch)
+            if error:
+                LOG.warning("latest branch revision could not be resolved: project=%s error=%s", project.name, error)
+                return replace(project, revision=branch), [], error
 
-        old_commit = self._rev_parse_commit(repo_path, project.revision)
-        if old_commit and old_commit == latest_revision:
-            LOG.info(
-                "manifest revision already matches latest branch revision: project=%s revision=%s",
-                project.name,
-                latest_revision,
-            )
-            return project, [], None
+            old_commit = self._rev_parse_commit(repo_path, project.revision)
+            if old_commit and old_commit == latest_revision:
+                LOG.info(
+                    "manifest revision already matches latest branch revision: project=%s revision=%s",
+                    project.name,
+                    latest_revision,
+                )
+                return project, [], None
 
-        latest_project = replace(project, revision=latest_revision)
-        commits, error = self._run_git_log(repo_path, project.revision, latest_revision)
-        return latest_project, commits, error
+            latest_project = replace(project, revision=latest_revision)
+            commits, error = self._run_git_log(repo_path, project.revision, latest_revision)
+            return latest_project, commits, error
+        finally:
+            self._active_project = previous_project
 
     def _get_commits_local(self, old_proj: Project, new_proj: Project) -> tuple[List[Dict[str, str]], Optional[str]]:
         """Local mode: run git log in the existing working tree."""
@@ -163,32 +188,38 @@ class GitFetcher:
         Return whether commit is reachable from project.revision.
         Returns (None, error_message) when the check cannot be completed.
         """
-        LOG.info(
-            "checking commit containment: project=%s revision=%s commit=%s mode=%s",
-            project.name,
-            project.revision,
-            commit,
-            "local" if self.repo_root else "remote",
-        )
-        if not project.revision:
-            LOG.warning("commit containment rejected because project revision is missing: %s", project.name)
-            return None, "Missing project revision for history check"
+        previous_project = self._active_project
+        self._active_project = _project_progress_label(project)
+        self._emit_progress(f"{self._active_project} status=processing")
+        try:
+            LOG.info(
+                "checking commit containment: project=%s revision=%s commit=%s mode=%s",
+                project.name,
+                project.revision,
+                commit,
+                "local" if self.repo_root else "remote",
+            )
+            if not project.revision:
+                LOG.warning("commit containment rejected because project revision is missing: %s", project.name)
+                return None, "Missing project revision for history check"
 
-        if self.repo_root:
-            repo_path = os.path.join(self.repo_root, project.path)
-            LOG.debug("using local project path for containment: project=%s path=%s", project.name, repo_path)
-            if not self._is_git_work_tree(repo_path):
-                LOG.warning("local git repo not found for containment: project=%s path=%s", project.name, repo_path)
-                return None, f"Local git repo not found at: {repo_path}"
-        else:
-            repo_path, error = self._prepare_remote_repo(project)
-            if error:
-                LOG.warning("remote repo preparation failed for containment: project=%s error=%s", project.name, error)
-                return None, error
-            self._try_fetch_revision(repo_path, project.revision)
-            self._try_fetch_revision(repo_path, commit)
+            if self.repo_root:
+                repo_path = os.path.join(self.repo_root, project.path)
+                LOG.debug("using local project path for containment: project=%s path=%s", project.name, repo_path)
+                if not self._is_git_work_tree(repo_path):
+                    LOG.warning("local git repo not found for containment: project=%s path=%s", project.name, repo_path)
+                    return None, f"Local git repo not found at: {repo_path}"
+            else:
+                repo_path, error = self._prepare_remote_repo(project)
+                if error:
+                    LOG.warning("remote repo preparation failed for containment: project=%s error=%s", project.name, error)
+                    return None, error
+                self._try_fetch_revision(repo_path, project.revision)
+                self._try_fetch_revision(repo_path, commit)
 
-        return self._contains_commit_in_repo(repo_path, commit, project.revision)
+            return self._contains_commit_in_repo(repo_path, commit, project.revision)
+        finally:
+            self._active_project = previous_project
 
     def _prepare_remote_repo(self, project: Project) -> tuple[str, Optional[str]]:
         """Create or update a cached bare clone for a project."""
@@ -569,23 +600,55 @@ class GitFetcher:
     def _run_subprocess(self, cmd: list[str]) -> subprocess.CompletedProcess:
         LOG.debug("running command: %s", _format_cmd(cmd))
         env = _git_noninteractive_env()
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.git_timeout,
-                env=env,
-            )
-        except subprocess.TimeoutExpired as e:
-            stderr = _timeout_stderr(cmd, self.git_timeout, e.stderr)
-            LOG.warning("command timed out: cmd=%s timeout=%s", _format_cmd(cmd), self.git_timeout)
-            return subprocess.CompletedProcess(
-                cmd,
-                124,
-                stdout=_stream_text(e.stdout),
-                stderr=stderr,
-            )
+        start = time.monotonic()
+        self._emit_command_progress(cmd, "started", self.git_timeout)
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        stdout = ""
+        stderr = ""
+        next_progress = start + max(self.progress_interval, 0.1)
+        while True:
+            elapsed = time.monotonic() - start
+            remaining = self.git_timeout - elapsed
+            if remaining <= 0:
+                process.kill()
+                stdout, stderr = process.communicate()
+                stderr = _timeout_stderr(cmd, self.git_timeout, stderr)
+                LOG.warning("command timed out: cmd=%s timeout=%s", _format_cmd(cmd), self.git_timeout)
+                return subprocess.CompletedProcess(
+                    cmd,
+                    124,
+                    stdout=_stream_text(stdout),
+                    stderr=stderr,
+                )
+
+            wait_for = remaining
+            if self.show_progress:
+                wait_for = min(wait_for, max(0.1, next_progress - time.monotonic()))
+
+            try:
+                stdout, stderr = process.communicate(timeout=wait_for)
+                break
+            except subprocess.TimeoutExpired:
+                now = time.monotonic()
+                remaining = max(0, self.git_timeout - (now - start))
+                if self.show_progress and now >= next_progress:
+                    self._emit_command_progress(cmd, "running", remaining)
+                    next_progress = now + max(self.progress_interval, 0.1)
+
+        result = subprocess.CompletedProcess(
+            cmd,
+            process.returncode,
+            stdout=_stream_text(stdout),
+            stderr=_stream_text(stderr),
+        )
+        remaining = max(0, self.git_timeout - (time.monotonic() - start))
+        self._emit_command_progress(cmd, "finished", remaining)
         if result.returncode == 0:
             LOG.debug("command succeeded: %s", _format_cmd(cmd))
         else:
@@ -596,6 +659,19 @@ class GitFetcher:
                 result.stderr.strip(),
             )
         return result
+
+    def _emit_progress(self, message: str) -> None:
+        if self.show_progress:
+            print(f"[repo_diff] {message}", file=sys.stderr, flush=True)
+
+    def _emit_command_progress(self, cmd: list[str], status: str, remaining: float) -> None:
+        if not self.show_progress:
+            return
+        project = self._active_project or "project=<unknown> path=<unknown>"
+        self._emit_progress(
+            f"{project} step={_command_step(cmd)} status={status} "
+            f"timeout_remaining={max(0, remaining):.0f}s"
+        )
 
     @staticmethod
     def _cache_name(url: str) -> str:
@@ -609,6 +685,22 @@ class GitFetcher:
 
 def _format_cmd(cmd: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in cmd)
+
+
+def _command_step(cmd: list[str]) -> str:
+    if not cmd:
+        return "unknown"
+    if cmd[0] == "git":
+        if len(cmd) > 1 and cmd[1] == "-C" and len(cmd) > 3:
+            return f"git {cmd[3]}"
+        if len(cmd) > 1:
+            return f"git {cmd[1]}"
+        return "git"
+    return cmd[0]
+
+
+def _project_progress_label(project: Project) -> str:
+    return f"project={project.name or '<unknown>'} path={project.path or '<unknown>'}"
 
 
 def _git_noninteractive_env() -> dict[str, str]:

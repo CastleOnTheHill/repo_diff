@@ -136,6 +136,7 @@ def _run_manifest_diff(args: argparse.Namespace, old_path: Path, new_path: Path)
             cache_dir=args.cache_dir,
             allow_floating_revisions=args.allow_floating_revisions,
             git_timeout=args.git_timeout,
+            show_progress=True,
         )
         for cp in diff_result.changed:
             LOG.info(
@@ -176,6 +177,7 @@ def _run_manifest_latest_diff(args: argparse.Namespace, manifest_path: Path) -> 
         cache_dir=args.cache_dir,
         allow_floating_revisions=args.allow_floating_revisions,
         git_timeout=args.git_timeout,
+        show_progress=True,
     )
     diff_result = DiffResult()
 
@@ -231,6 +233,7 @@ def _run_commit_search(args: argparse.Namespace, manifest_path: Path) -> int:
         cache_dir=args.cache_dir,
         allow_floating_revisions=args.allow_floating_revisions,
         git_timeout=args.git_timeout,
+        show_progress=True,
     )
 
     results = []
